@@ -45,12 +45,15 @@ void BaseButton::_unpress_group() {
 		queue_accessibility_update();
 	}
 
+	// Only unpress other buttons that are pressed to avoid redundant signals/redraws.
 	for (BaseButton *E : button_group->buttons) {
 		if (E == this) {
 			continue;
 		}
 
-		E->set_pressed(false);
+		if (E->is_pressed()) {
+			E->set_pressed(false);
+		}
 	}
 }
 
@@ -73,9 +76,10 @@ void BaseButton::gui_input(const Ref<InputEvent> &p_event) {
 		return;
 	}
 
-	Ref<InputEventMouseMotion> mouse_motion = p_event;
-	if (mouse_motion.is_valid()) {
-		if (status.press_attempt) {
+	// micro-opt: only create a motion ref when the event is actually a mouse motion
+	if (p_event->is_class("InputEventMouseMotion")) {
+		Ref<InputEventMouseMotion> mouse_motion = p_event;
+		if (mouse_motion.is_valid() && status.press_attempt) {
 			bool last_press_inside = status.pressing_inside;
 			status.pressing_inside = has_point(mouse_motion->get_position());
 			if (last_press_inside != status.pressing_inside) {
@@ -92,7 +96,7 @@ void BaseButton::_accessibility_action_click(const Variant &p_data) {
 		if (status.pressed) {
 			_unpress_group();
 			if (button_group.is_valid()) {
-				button_group->emit_signal(SceneStringName(pressed), this);
+				button_group->emit_signal(SNAME("pressed"), this);
 			}
 		}
 
@@ -111,28 +115,33 @@ void BaseButton::_notification(int p_what) {
 			RID ae = get_accessibility_element();
 			ERR_FAIL_COND(ae.is_null());
 
-			DisplayServer::get_singleton()->accessibility_update_set_role(ae, DisplayServer::AccessibilityRole::ROLE_BUTTON);
+			// Cache DisplayServer singleton to avoid repeating lookups.
+			DisplayServer *ds = DisplayServer::get_singleton();
+			ds->accessibility_update_set_role(ae, DisplayServer::AccessibilityRole::ROLE_BUTTON);
 
-			DisplayServer::get_singleton()->accessibility_update_add_action(ae, DisplayServer::AccessibilityAction::ACTION_CLICK, callable_mp(this, &BaseButton::_accessibility_action_click));
-			DisplayServer::get_singleton()->accessibility_update_set_flag(ae, DisplayServer::AccessibilityFlags::FLAG_DISABLED, status.disabled);
+			ds->accessibility_update_add_action(ae, DisplayServer::AccessibilityAction::ACTION_CLICK, callable_mp(this, &BaseButton::_accessibility_action_click));
+			ds->accessibility_update_set_flag(ae, DisplayServer::AccessibilityFlags::FLAG_DISABLED, status.disabled);
 			if (toggle_mode) {
-				DisplayServer::get_singleton()->accessibility_update_set_checked(ae, status.pressed);
+				ds->accessibility_update_set_checked(ae, status.pressed);
 			}
 			if (button_group.is_valid()) {
 				for (const BaseButton *btn : button_group->buttons) {
 					if (btn->is_part_of_edited_scene()) {
 						continue;
 					}
-					DisplayServer::get_singleton()->accessibility_update_add_related_radio_group(ae, btn->get_accessibility_element());
+					ds->accessibility_update_add_related_radio_group(ae, btn->get_accessibility_element());
 				}
 			}
 			if (shortcut_in_tooltip && shortcut.is_valid() && shortcut->has_valid_event()) {
-				String text = atr(shortcut->get_name()) + " (" + shortcut->get_as_text() + ")";
+				// Cache strings locally to avoid multiple calls/allocation
+				String sc_name = shortcut->get_name();
+				String sc_text = shortcut->get_as_text();
+				String text = atr(sc_name) + " (" + sc_text + ")";
 				String tooltip = get_tooltip_text();
-				if (!tooltip.is_empty() && shortcut->get_name().nocasecmp_to(tooltip) != 0) {
+				if (!tooltip.is_empty() && sc_name.nocasecmp_to(tooltip) != 0) {
 					text += "\n" + atr(tooltip);
 				}
-				DisplayServer::get_singleton()->accessibility_update_set_tooltip(ae, text);
+				ds->accessibility_update_set_tooltip(ae, text);
 			}
 		} break;
 
@@ -192,13 +201,15 @@ void BaseButton::_notification(int p_what) {
 void BaseButton::_pressed() {
 	GDVIRTUAL_CALL(_pressed);
 	pressed();
-	emit_signal(SceneStringName(pressed));
+	static const SceneStringName SIG_PRESSED = SNAME("pressed");
+	emit_signal(SIG_PRESSED);
 }
 
 void BaseButton::_toggled(bool p_pressed) {
 	GDVIRTUAL_CALL(_toggled, p_pressed);
 	toggled(p_pressed);
-	emit_signal(SceneStringName(toggled), p_pressed);
+	static const SceneStringName SIG_TOGGLED = SNAME("toggled");
+	emit_signal(SIG_TOGGLED, p_pressed);
 }
 
 void BaseButton::on_action_event(Ref<InputEvent> p_event) {
@@ -224,7 +235,7 @@ void BaseButton::on_action_event(Ref<InputEvent> p_event) {
 				status.pressed = !status.pressed;
 				_unpress_group();
 				if (button_group.is_valid()) {
-					button_group->emit_signal(SceneStringName(pressed), this);
+					button_group->emit_signal(SNAME("pressed"), this);
 				}
 				_toggled(status.pressed);
 				_pressed();
@@ -292,7 +303,7 @@ void BaseButton::set_pressed(bool p_pressed) {
 	if (p_pressed) {
 		_unpress_group();
 		if (button_group.is_valid()) {
-			button_group->emit_signal(SceneStringName(pressed), this);
+			button_group->emit_signal(SNAME("pressed"), this);
 		}
 	}
 	_toggled(status.pressed);
@@ -441,7 +452,7 @@ void BaseButton::shortcut_input(const Ref<InputEvent> &p_event) {
 
 			_unpress_group();
 			if (button_group.is_valid()) {
-				button_group->emit_signal(SceneStringName(pressed), this);
+				button_group->emit_signal(SNAME("pressed"), this);
 			}
 
 			_toggled(status.pressed);
@@ -477,17 +488,14 @@ Control *BaseButton::make_custom_tooltip(const String &p_text) const {
 		return nullptr; // Use the default tooltip label.
 	}
 
-	String text = atr(shortcut->get_name()) + " (" + shortcut->get_as_text() + ")";
-	if (!p_text.is_empty() && shortcut->get_name().nocasecmp_to(p_text) != 0) {
+	// Cache name/text to avoid duplicate calls
+	String sc_name = shortcut->get_name();
+	String sc_text = shortcut->get_as_text();
+	String text = atr(sc_name) + " (" + sc_text + ")";
+	if (!p_text.is_empty() && sc_name.nocasecmp_to(p_text) != 0) {
 		text += "\n" + atr(p_text);
 	}
 
-	// Make a label similar to the default tooltip label.
-	// Auto translation is disabled because we already did that manually above.
-	//
-	// We can't customize the tooltip text by overriding `get_tooltip()`
-	// because otherwise user-defined `_make_custom_tooltip()` would receive
-	// the translated and annotated text.
 	Label *label = memnew(Label(text));
 	label->set_auto_translate_mode(AUTO_TRANSLATE_MODE_DISABLED);
 	label->set_theme_type_variation(SNAME("TooltipLabel"));
@@ -496,6 +504,11 @@ Control *BaseButton::make_custom_tooltip(const String &p_text) const {
 }
 
 void BaseButton::set_button_group(const Ref<ButtonGroup> &p_group) {
+	// Early out when setting same group to avoid erase/insert and redraw
+	if (button_group == p_group) {
+		return;
+	}
+
 	if (button_group.is_valid()) {
 		button_group->buttons.erase(this);
 	}
